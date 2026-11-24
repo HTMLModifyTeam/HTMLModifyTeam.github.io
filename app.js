@@ -1,18 +1,34 @@
-const buttons = [...document.querySelectorAll('.repo')];
-const presetVX = [1.05, -0.9, 0.82, -1.12];
-const presetVY = [0.78, 1.08, -1.1, -0.72];
-const randomSpeed = () => (0.7 + Math.random() * 0.5) * (Math.random() < 0.5 ? -1 : 1);
-const tabs = [...document.querySelectorAll('.tab')];
+// ---------- DOM ----------
 const tabBar = document.querySelector('.tabs');
-const movers = buttons.map((element) => ({ element, group: element.dataset.group, x: 0, y: 0, vx: 0, vy: 0, width: 0, height: 0 }));
-let active = [];
-let lastTime = 0;
-const getTop = () => Math.ceil(tabBar.getBoundingClientRect().bottom);
-let previousWidth = window.innerWidth;
-let previousHeight = window.innerHeight;
+const tabs = [...document.querySelectorAll('.tab')];
+const title = document.querySelector('h1');
+const credits = document.querySelector('.credits');
 
+// ---------- Config ----------
+// Starting position (fraction of viewport) and velocity for the first few boxes per tab.
+const PRESETS = [
+  { x: .07, y: .10, vx: 1.05, vy: .78 },
+  { x: .74, y: .36, vx: -.90, vy: 1.08 },
+  { x: .12, y: .68, vx: .82, vy: -1.10 },
+  { x: .72, y: .80, vx: -1.12, vy: -.72 },
+];
+const randomSpeed = () => (0.7 + Math.random() * 0.5) * (Math.random() < 0.5 ? -1 : 1);
+
+const movers = [...document.querySelectorAll('.repo')].map((element) => ({
+  element, group: element.dataset.group, x: 0, y: 0, vx: 0, vy: 0, width: 0, height: 0,
+}));
+
+// ---------- State ----------
+let active = [];
+let bounds = { w: window.innerWidth, h: window.innerHeight, top: 0 };
+let lastTime = 0;
+let rafId = 0;
+let resizeQueued = false;
+
+// ---------- Audio ----------
 let audioCtx = null;
 let lastSoundTime = 0;
+const UNLOCK_EVENTS = ['pointerdown', 'keydown', 'touchstart'];
 
 function unlockAudio() {
   if (!audioCtx) {
@@ -20,15 +36,19 @@ function unlockAudio() {
     if (!AC) return;
     audioCtx = new AC();
   }
-  if (audioCtx.state === 'suspended') audioCtx.resume();
+  Promise.resolve(audioCtx.resume()).then(() => {
+    // Once audio is running, the unlock listeners are no longer needed.
+    if (audioCtx.state === 'running') {
+      UNLOCK_EVENTS.forEach((type) => window.removeEventListener(type, unlockAudio));
+    }
+  });
 }
+UNLOCK_EVENTS.forEach((type) => window.addEventListener(type, unlockAudio, { passive: true }));
 
-['pointerdown', 'keydown', 'touchstart'].forEach((type) => window.addEventListener(type, unlockAudio, { passive: true }));
-
-function playBounce(baseFreq = 260, volume = 0.12) {
+function playBounce(baseFreq, volume) {
   if (!audioCtx || audioCtx.state !== 'running') return;
   const now = audioCtx.currentTime;
-  if (now - lastSoundTime < 0.025) return; // avoid stacking too many sounds at once
+  if (now - lastSoundTime < 0.025) return; // avoid stacking too many sounds
   lastSoundTime = now;
 
   const freq = baseFreq * (0.9 + Math.random() * 0.25);
@@ -45,111 +65,159 @@ function playBounce(baseFreq = 260, volume = 0.12) {
   osc.stop(now + 0.16);
 }
 
-const playWallBounce = () => playBounce(220, 0.1);
+const playWallBounce = () => playBounce(220, 0.10);
 const playBoxBounce = () => playBounce(440, 0.14);
+
+// ---------- Colors ----------
+function shuffle(array) {
+  for (let i = array.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [array[i], array[j]] = [array[j], array[i]];
+  }
+  return array;
+}
+
+// h: 0-360, s/l: 0-1 -> [r, g, b] in 0-1
+function hslToRgb(h, s, l) {
+  const a = s * Math.min(l, 1 - l);
+  const f = (n) => {
+    const k = (n + h / 30) % 12;
+    return l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1));
+  };
+  return [f(0), f(8), f(4)];
+}
 
 function randomizeColors() {
   const base = Math.random() * 360;
-  const order = movers.map((_, i) => i).sort(() => Math.random() - 0.5);
+  const order = shuffle(movers.map((_, i) => i));
   movers.forEach((mover, i) => {
     const hue = (base + order[i] * (360 / movers.length) + (Math.random() * 30 - 15) + 360) % 360;
     const sat = 60 + Math.random() * 30;
     const light = 45 + Math.random() * 35;
-    mover.element.style.setProperty('--btn-bg', `hsl(${hue.toFixed(0)} ${sat.toFixed(0)}% ${light.toFixed(0)}%)`);
-    // pick black/white text by approximate perceived luminance
-    const s = sat / 100, l = light / 100, a = s * Math.min(l, 1 - l);
-    const f = (n) => { const k = (n + hue / 30) % 12; return l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1)); };
-    const lum = 0.299 * f(0) + 0.587 * f(8) + 0.114 * f(4);
-    mover.element.style.setProperty('--btn-fg', lum > 0.6 ? '#171717' : '#ffffff');
+    const [r, g, b] = hslToRgb(hue, sat / 100, light / 100);
+    const luma = 0.299 * r + 0.587 * g + 0.114 * b; // approximate perceived brightness
+    const { style } = mover.element;
+    style.setProperty('--btn-bg', `hsl(${hue.toFixed(0)} ${sat.toFixed(0)}% ${light.toFixed(0)}%)`);
+    style.setProperty('--btn-fg', luma > 0.6 ? '#171717' : '#ffffff');
   });
 }
 
-function sizeStage() {
+// ---------- Layout ----------
+const place = (m) => { m.element.style.transform = `translate3d(${m.x}px, ${m.y}px, 0)`; };
+
+// Measures everything once (reads), then positions (writes). Runs on tab change and resize,
+// never inside the animation loop.
+function layout() {
   const w = window.innerWidth;
   const h = window.innerHeight;
-  const top = getTop();
-  active.forEach((mover, index) => {
-    const firstLayout = mover.width === 0;
-    const rect = mover.element.getBoundingClientRect();
-    mover.width = rect.width;
-    mover.height = rect.height;
-    const maxX = Math.max(0, w - mover.width);
-    const maxY = Math.max(top, h - mover.height);
+  const top = Math.ceil(tabBar.getBoundingClientRect().bottom);
+  const prev = bounds;
+  const rects = active.map((m) => m.element.getBoundingClientRect()); // batched reads
+
+  active.forEach((m, i) => {
+    const first = m.width === 0;
+    const oldMaxX = Math.max(0, prev.w - m.width);
+    const oldRangeY = Math.max(0, prev.h - m.height - prev.top);
+
+    m.width = rects[i].width;
+    m.height = rects[i].height;
+    const maxX = Math.max(0, w - m.width);
+    const maxY = Math.max(top, h - m.height);
     const rangeY = maxY - top;
-    if (firstLayout) {
-      mover.vx = presetVX[index] ?? randomSpeed();
-      mover.vy = presetVY[index] ?? randomSpeed();
-      mover.x = [w * .07, w * .74, w * .12, w * .72][index] ?? Math.random() * maxX;
-      mover.y = top + ([.1, .36, .68, .8][index] ?? Math.random()) * rangeY;
+
+    if (first) {
+      const p = PRESETS[i];
+      m.vx = p?.vx ?? randomSpeed();
+      m.vy = p?.vy ?? randomSpeed();
+      m.x = p ? w * p.x : Math.random() * maxX;
+      m.y = top + (p ? p.y : Math.random()) * rangeY;
     } else {
-      mover.x = mover.x / Math.max(1, previousWidth - mover.width) * maxX;
-      mover.y = top + (mover.y - top) / Math.max(1, previousHeight - top - mover.height) * rangeY;
+      // Keep the same relative position when the viewport changes.
+      m.x = oldMaxX ? (m.x / oldMaxX) * maxX : m.x;
+      m.y = top + (oldRangeY ? ((m.y - prev.top) / oldRangeY) * rangeY : 0);
     }
-    mover.x = Math.max(0, Math.min(maxX, mover.x));
-    mover.y = Math.max(top, Math.min(maxY, mover.y));
-    mover.element.style.left = `${mover.x}px`;
-    mover.element.style.top = `${mover.y}px`;
+    m.x = Math.max(0, Math.min(maxX, m.x));
+    m.y = Math.max(top, Math.min(maxY, m.y));
+    place(m);
   });
-  previousWidth = w;
-  previousHeight = h;
+
+  bounds = { w, h, top };
 }
 
+function queueLayout() {
+  if (resizeQueued) return;
+  resizeQueued = true;
+  requestAnimationFrame(() => { resizeQueued = false; layout(); });
+}
+
+// ---------- Tabs ----------
 function setTab(name) {
+  const showingCredits = name === 'credits';
   tabs.forEach((tab) => tab.setAttribute('aria-selected', String(tab.dataset.tab === name)));
-  movers.forEach((mover) => { mover.element.hidden = mover.group !== name; mover.width = 0; });
-  active = movers.filter((mover) => mover.group === name);
-  sizeStage();
+  title.hidden = showingCredits;
+  credits.hidden = !showingCredits;
+  movers.forEach((m) => {
+    m.element.hidden = showingCredits || m.group !== name;
+    m.width = 0; // forces a fresh initial layout
+  });
+  active = showingCredits ? [] : movers.filter((m) => m.group === name);
+  layout();
+  start();
 }
 
-tabs.forEach((tab) => tab.addEventListener('click', () => setTab(tab.dataset.tab)));
-
-function animate(time) {
-  const step = Math.min(2, (time - (lastTime || time)) / 16.67);
+// ---------- Animation ----------
+function step(time) {
+  const dt = Math.min(2, (time - (lastTime || time)) / 16.67);
   lastTime = time;
-  const maxW = window.innerWidth;
-  const maxH = window.innerHeight;
-  const top = getTop();
-  for (const mover of active) {
-    const right = Math.max(0, maxW - mover.width);
-    const bottom = Math.max(top, maxH - mover.height);
-    mover.x += mover.vx * step;
-    mover.y += mover.vy * step;
-    if (mover.x <= 0) { mover.x = 0; if (mover.vx < 0) playWallBounce(); mover.vx = Math.abs(mover.vx); }
-    if (mover.x >= right) { mover.x = right; if (mover.vx > 0) playWallBounce(); mover.vx = -Math.abs(mover.vx); }
-    if (mover.y <= top) { mover.y = top; if (mover.vy < 0) playWallBounce(); mover.vy = Math.abs(mover.vy); }
-    if (mover.y >= bottom) { mover.y = bottom; if (mover.vy > 0) playWallBounce(); mover.vy = -Math.abs(mover.vy); }
-    mover.element.style.left = `${mover.x}px`;
-    mover.element.style.top = `${mover.y}px`;
+  const { w, h, top } = bounds;
+
+  for (const m of active) {
+    const right = Math.max(0, w - m.width);
+    const bottom = Math.max(top, h - m.height);
+    m.x += m.vx * dt;
+    m.y += m.vy * dt;
+    if (m.x <= 0) { m.x = 0; if (m.vx < 0) playWallBounce(); m.vx = Math.abs(m.vx); }
+    if (m.x >= right) { m.x = right; if (m.vx > 0) playWallBounce(); m.vx = -Math.abs(m.vx); }
+    if (m.y <= top) { m.y = top; if (m.vy < 0) playWallBounce(); m.vy = Math.abs(m.vy); }
+    if (m.y >= bottom) { m.y = bottom; if (m.vy > 0) playWallBounce(); m.vy = -Math.abs(m.vy); }
   }
+
   for (let i = 0; i < active.length; i++) {
     for (let j = i + 1; j < active.length; j++) {
       const a = active[i], b = active[j];
       const overlapX = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x);
       const overlapY = Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y);
-      if (overlapX > 0 && overlapY > 0) {
-        if (overlapX < overlapY) {
-          const direction = a.x + a.width / 2 < b.x + b.width / 2 ? -1 : 1;
-          a.x += direction * (overlapX / 2 + .5);
-          b.x -= direction * (overlapX / 2 + .5);
-          [a.vx, b.vx] = [b.vx, a.vx];
-        } else {
-          const direction = a.y + a.height / 2 < b.y + b.height / 2 ? -1 : 1;
-          a.y += direction * (overlapY / 2 + .5);
-          b.y -= direction * (overlapY / 2 + .5);
-          [a.vy, b.vy] = [b.vy, a.vy];
-        }
-        playBoxBounce();
+      if (overlapX <= 0 || overlapY <= 0) continue;
+
+      if (overlapX < overlapY) {
+        const dir = a.x + a.width / 2 < b.x + b.width / 2 ? -1 : 1;
+        a.x += dir * (overlapX / 2 + .5);
+        b.x -= dir * (overlapX / 2 + .5);
+        [a.vx, b.vx] = [b.vx, a.vx];
+      } else {
+        const dir = a.y + a.height / 2 < b.y + b.height / 2 ? -1 : 1;
+        a.y += dir * (overlapY / 2 + .5);
+        b.y -= dir * (overlapY / 2 + .5);
+        [a.vy, b.vy] = [b.vy, a.vy];
       }
+      playBoxBounce();
     }
   }
-  for (const mover of active) {
-    mover.element.style.left = `${mover.x}px`;
-    mover.element.style.top = `${mover.y}px`;
-  }
-  requestAnimationFrame(animate);
+
+  active.forEach(place); // single write per element per frame
+
+  // Nothing to animate (e.g. Credits tab): stop the loop instead of idling.
+  rafId = active.length ? requestAnimationFrame(step) : 0;
 }
 
+function start() {
+  if (rafId || !active.length) return;
+  lastTime = 0;
+  rafId = requestAnimationFrame(step);
+}
+
+// ---------- Init ----------
+tabs.forEach((tab) => tab.addEventListener('click', () => setTab(tab.dataset.tab)));
+window.addEventListener('resize', queueLayout);
 randomizeColors();
 setTab('phone');
-window.addEventListener('resize', sizeStage);
-requestAnimationFrame(animate);
