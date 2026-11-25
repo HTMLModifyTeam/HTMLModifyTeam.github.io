@@ -4,14 +4,6 @@ const tabs = [...document.querySelectorAll('.tab')];
 const title = document.querySelector('h1');
 const credits = document.querySelector('.credits');
 
-// ---------- Config ----------
-// Starting position (fraction of viewport) and velocity for the first few boxes per tab.
-const PRESETS = [
-  { x: .07, y: .10, vx: 1.05, vy: .78 },
-  { x: .74, y: .36, vx: -.90, vy: 1.08 },
-  { x: .12, y: .68, vx: .82, vy: -1.10 },
-  { x: .72, y: .80, vx: -1.12, vy: -.72 },
-];
 const randomSpeed = () => (0.7 + Math.random() * 0.5) * (Math.random() < 0.5 ? -1 : 1);
 
 const movers = [...document.querySelectorAll('.repo')].map((element) => ({
@@ -126,11 +118,10 @@ function layout() {
     const rangeY = maxY - top;
 
     if (first) {
-      const p = PRESETS[i];
-      m.vx = p?.vx ?? randomSpeed();
-      m.vy = p?.vy ?? randomSpeed();
-      m.x = p ? w * p.x : Math.random() * maxX;
-      m.y = top + (p ? p.y : Math.random()) * rangeY;
+      m.vx = randomSpeed();
+      m.vy = randomSpeed();
+      m.x = Math.random() * maxX;
+      m.y = top + Math.random() * rangeY;
     } else {
       // Keep the same relative position when the viewport changes.
       m.x = oldMaxX ? (m.x / oldMaxX) * maxX : m.x;
